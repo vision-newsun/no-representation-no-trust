@@ -91,6 +91,18 @@ def main(config: DictConfig) -> None:
     with torch.no_grad():
         policy_module(dummy_t)
         value_module(dummy_t)
+
+    # Parameters name check.
+    '''
+    print("\nPOLICY PARAMETERS:")
+    for name, param in policy_module.named_parameters():
+        print(name, tuple(param.shape))
+
+    print("\nVALUE PARAMETERS:")
+    for name, param in value_module.named_parameters():
+        print(name, tuple(param.shape))
+    '''
+
     logger.debug(f"Policy module: {policy_module}")
     logger.debug(f"Value module: {value_module}")
 
@@ -431,6 +443,15 @@ def main(config: DictConfig) -> None:
                 timers["backward_minibatch"] = time.time()
                 with torch.autograd.set_detect_anomaly(True):
                     total_loss.backward()
+
+                if minibatch_logger.log_this_round:
+                    actor_grad_stats = metrics.compute_layerwise_grad_stats(
+                        policy_module
+                    )
+                    critic_grad_stats = metrics.compute_layerwise_grad_stats(
+                        value_module
+                    )
+
                 timers["backward_minibatch"] = time.time() - timers["backward_minibatch"]
 
                 if "kl" in losses_policy.keys():
@@ -497,6 +518,52 @@ def main(config: DictConfig) -> None:
                     }
                     minibatch_logger.log_to_file(filter_out_wandb(to_log))
                     wandb.log(filter_out_underscore(to_log))
+
+                    actor_layer_names = {
+                        "module.0.module.0.module.0.module.0.0": "conv1",
+                        "module.0.module.0.module.0.module.0.2": "conv2",
+                        "module.0.module.0.module.0.module.0.4": "conv3",
+                        "module.0.module.0.module.0.module.1.0": "fc",
+                        "module.0.module.1.module.0": "head",
+                    }
+
+                    critic_layer_names = {
+                        "module.0.module.0.module.0.0": "conv1",
+                        "module.0.module.0.module.0.2": "conv2",
+                        "module.0.module.0.module.0.4": "conv3",
+                        "module.0.module.0.module.1.0": "fc",
+                        "module.1.module": "head",
+                    }
+
+                    gradient_logs = {}
+
+                    for layer_name, stats in actor_grad_stats.items():
+                        friendly_name = actor_layer_names.get(layer_name, layer_name)
+
+                        gradient_logs[
+                            f"actor/{friendly_name}/grad_norm"
+                        ] = stats["grad_norm"]
+
+                        gradient_logs[
+                            f"actor/{friendly_name}/grad_rms"
+                        ] = stats["grad_rms"]
+
+                    for layer_name, stats in critic_grad_stats.items():
+                        friendly_name = critic_layer_names.get(layer_name, layer_name)
+
+                        gradient_logs[
+                            f"critic/{friendly_name}/grad_norm"
+                        ] = stats["grad_norm"]
+
+                        gradient_logs[
+                            f"critic/{friendly_name}/grad_rms"
+                        ] = stats["grad_rms"]
+
+                    minibatch_logs.update_with_prefix({
+                        f"gradients/{key}": value
+                        for key, value in gradient_logs.items()
+                    })
+
 
                 if minibatch_logger.is_first:
                     first_minibatch_logs = dict_with_prefix(minibatch_logs, "epoch/first_")

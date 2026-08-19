@@ -321,3 +321,42 @@ def compute_models_diff(data_outputs, data_targets, policy_module, reverse_kl=Fa
             out[f"{key}_l2_batch"] = F.mse_loss(data_outputs[key], data_targets[key])
             out[f"{key}_cosine"] = F.cosine_similarity(data_outputs[key], data_targets[key], dim=-1).mean()
     return out
+
+def compute_layerwise_grad_stats(module):
+    stats = {}
+
+    for name, param in module.named_parameters():
+        if param.grad is None:
+            continue
+
+        layer_name = name.rsplit(".", 1)[0]
+
+        grad_sq_sum = param.grad.detach().pow(2).sum()
+        param_sq_sum = param.detach().pow(2).sum()
+        numel = param.numel()
+
+        if layer_name not in stats:
+            stats[layer_name] = {
+                "grad_sq_sum": grad_sq_sum,
+                "param_sq_sum": param_sq_sum,
+                "numel": numel
+            }
+        else:
+            stats[layer_name]["grad_sq_sum"] += grad_sq_sum
+            stats[layer_name]["param_sq_sum"] += param_sq_sum
+            stats[layer_name]["numel"] += numel
+
+    result = {}
+
+    for layer_name, values in stats.items():
+        grad_norm = values["grad_sq_sum"].sqrt()
+        param_norm = values["param_sq_sum"].sqrt()
+
+        result[layer_name] = {
+            "grad_norm": grad_norm.item(),
+            "grad_rms" :
+                (values["grad_sq_sum"] / values["numel"]).sqrt().item(),
+            "relative_grad_norm": (grad_norm / (param_norm + 1e-12)).item(),
+        }
+
+    return result
