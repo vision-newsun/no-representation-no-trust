@@ -33,6 +33,11 @@ debug:
 
 sparsify_rewards: False
 
+diagnostics:
+  ntk:
+    enabled: False
+    num_probe_states: 32
+
 logging:
   log_level:
     # Frequency at which to log the training progress.

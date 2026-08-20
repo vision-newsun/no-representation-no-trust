@@ -325,6 +325,30 @@ def main(config: DictConfig) -> None:
 
         # Flattens the batch dimensions (num_envs, num_frames) -> (num_envs * num_frames).
         data = batches.reshape(-1)
+
+        if config.diagnostics.ntk.enabled and ntk_probe_states is None:
+            n_probe = min(
+                config.diagnostics.ntk.num_probe_states,
+                data.shape[0],
+            )
+
+            index_device = data.device if data.device is not None else "cpu"
+
+            probe_indices = torch.linspace(
+                0,
+                data.shape[0] - 1,
+                steps=n_probe,
+                device=index_device,
+            ).long()
+
+            ntk_probe_states = (
+                data.select(OBS_KEY)[probe_indices]
+                .clone()
+                .cpu()
+            )
+
+            torch.save(ntk_probe_states, "ntk_probe_states.pt")
+
         if batch_logger.log_this_round:
             timers["eff_rnk_batch"] = time.time()
             batch_logs.update_with_prefix(

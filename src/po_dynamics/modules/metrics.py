@@ -360,3 +360,118 @@ def compute_layerwise_grad_stats(module):
         }
 
     return result
+
+def _effective_rank_from_psd(matrix, eps=1e-12):
+    # matrix is small: (N, N), so do eigendecomposition on CPU in float64
+    eigvals = torch.linalg.eigvalsh(
+        matrix.detach().cpu().double()
+    ).clamp_min(0)
+
+    total = eigvals.sum()
+
+    if total.item() <= eps:
+        return 0.0
+
+    probs = eigvals / total
+    probs = probs[probs > eps]
+
+    entropy = -(probs * probs.log()).sum()
+
+    return entropy.exp().item()
+
+
+def compute_critic_jacobian_ntk_stats(
+    value_module,
+    probe_states,
+    parameter_prefix="module.0.",
+    eps=1e-12,
+):
+    """
+    Compute Jacobian / NTK diagnostics for the critic representation trunk.
+
+    probe_states:
+        fixed TensorDict containing observations.
+
+    parameter_prefix="module.0.":
+        selects critic feature trunk and excludes the value head.
+    """
+
+    named_params = [
+        (name, param)
+        for name, param in value_module.named_parameters()
+        if name.startswith(parameter_prefix) and param.requires_grad
+    ]
+
+    if not named_params:
+        raise RuntimeError(
+            f"No critic parameters matched prefix {parameter_prefix!r}"
+        )
+
+    params = [param for _, param in named_params]
+
+    device = params[0].device
+    probe = probe_states.clone().to(device)
+
+    # Fresh forward WITH autograd.
+    out = value_module(probe)
+    values = out["state_value"].reshape(-1)
+
+    n_states = values.numel()
+    n_params = sum(param.numel() for param in params)
+
+    jacobian = torch.empty(
+        (n_states, n_params),
+        device=device,
+        dtype=params[0].dtype,
+    )
+
+    for i in range(n_states):
+        grads = torch.autograd.grad(
+            values[i],
+            params,
+            retain_graph=(i < n_states - 1),
+            create_graph=False,
+            allow_unused=False,
+        )
+
+        offset = 0
+
+        for grad in grads:
+            grad_flat = grad.detach().reshape(-1)
+            next_offset = offset + grad_flat.numel()
+
+            jacobian[i, offset:next_offset] = grad_flat
+            offset = next_offset
+
+    # K = J J^T
+    ntk = jacobian @ jacobian.T
+
+    # ||grad V(s_i)|| for each probe state
+    row_sq_norms = torch.diagonal(ntk).clamp_min(0)
+    row_norms = row_sq_norms.sqrt()
+
+    # Cosine-normalized NTK:
+    # K_ij / (||g_i|| ||g_j||)
+    denominator = row_norms[:, None] * row_norms[None, :]
+
+    cosine_ntk = torch.where(
+        denominator > eps,
+        ntk / denominator.clamp_min(eps),
+        torch.zeros_like(ntk),
+    )
+
+    jacobian_row_norm_rms = row_sq_norms.mean().sqrt().item()
+
+    jacobian_element_rms = (
+        row_sq_norms.sum() / (n_states * n_params)
+    ).sqrt().item()
+
+    ntk_effective_rank = _effective_rank_from_psd(ntk)
+    cosine_ntk_effective_rank = _effective_rank_from_psd(cosine_ntk)
+
+    return {
+        "jacobian_row_norm_rms": jacobian_row_norm_rms,
+        "jacobian_element_rms": jacobian_element_rms,
+        "ntk_effective_rank": ntk_effective_rank,
+        "cosine_ntk_effective_rank": cosine_ntk_effective_rank,
+    }
